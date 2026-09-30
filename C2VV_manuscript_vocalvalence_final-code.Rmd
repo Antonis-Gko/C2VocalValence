@@ -1,0 +1,572 @@
+---
+title: "C2VV Acoustic features - Methods & Results"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+---
+```{r setup}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE,
+	error = FALSE
+)
+```
+
+```{r load packages, message=FALSE, warning=FALSE}
+
+# Load packages
+library(readxl)
+library(tidyverse)
+library(broom.mixed)
+library(performance)
+library(emmeans)
+library(glmmTMB)
+library(patchwork)
+```
+
+```{r load data for non-overlapping calls, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Read data
+rawdata <- read_xlsx("calls_features.xlsx") %>%
+  select(
+    call_id, call_type, valence, arousal_15pre_15post_distance_px,
+    `Mean F0 (Hz)`, `Max F0 (Hz)`, `Range F0 (Hz)`, `F0 Abs Slope`,
+    `FM Rate (s-1)`, `AM rate (s-1)`, `Fpeak (Hz)`, spectral_entropy,
+    `Sound duration (s)`, `Q25% (Hz)`, `Q50% (Hz)`, `Q75% (Hz)`,
+    spectral_centroid, Harmonicity
+  ) %>%
+  mutate(call_type = as.factor(call_type),
+         valence = factor(valence, levels = c("Positive", "Negative", "Ambiguous", "Other")),
+    # Remove anything before "C2VV" if present
+         call_id_clean = str_replace(call_id, ".*?(?=C2VV)", ""),
+    # Extract trial (e.g. T6, T11)
+       trial = word(call_id_clean, 2, sep = "_"),
+    # Extract individual label (e.g. Black)
+       individual = word(call_id_clean, 3, sep = "_"),
+    # Combine into individual_id
+       individual_id = paste(trial, individual, sep = "_")
+         ) %>%
+  select(-call_id_clean, -individual) %>%   # remove columns
+  relocate(individual_id, trial, .after = 1) %>%       # move to 2nd column position
+  mutate(individual_id = as.factor(individual_id),
+         trial = as.factor(trial)
+         )
+
+```
+
+```{r select negative calls with low arousal}
+
+# Remove white spaces and brackets in rawdata and replace with _
+names(rawdata) <- names(rawdata) %>%
+  stringr::str_replace_all("[[:space:]]+", "_") %>%
+  stringr::str_replace_all("[()]", "")
+
+# Restrict negative calls to the arousal range observed in positive clucks and whines
+emotion_calls <- rawdata %>%
+  filter(call_type %in% c("Cluck", "Whine"),
+         valence %in% c("Positive", "Negative"))
+
+max_positive_arousal <- emotion_calls %>%
+  filter(valence == "Positive") %>%
+  summarise(max_arousal = max(arousal_15pre_15post_distance_px, na.rm = TRUE)) %>%
+  pull(max_arousal)
+
+n_before_arousal_filter <- nrow(emotion_calls)
+
+data_lowarousal <- emotion_calls %>%
+  filter(arousal_15pre_15post_distance_px <= max_positive_arousal)
+
+n_removed_arousal_filter <- n_before_arousal_filter - nrow(data_lowarousal)
+
+```
+
+```{r create features dataset, message=FALSE, warning=FALSE}
+# Reduce dataset to include only features of interest
+
+data_features <- data_lowarousal %>%
+  mutate(fan_status = factor(if_else(trial %in% c("T6", "T7"), 1, 0))
+        ) %>%
+  rename(arousal = arousal_15pre_15post_distance_px,
+         FM_rate = `FM_Rate_s-1`,
+         AM_rate = `AM_rate_s-1`,
+         Q25 = `Q25%_Hz`,
+         Q50 = `Q50%_Hz`,
+         Q75 = `Q75%_Hz`
+         ) %>%
+  select(individual_id, trial, fan_status, call_type, valence, arousal, Mean_F0_Hz, Max_F0_Hz, Range_F0_Hz, F0_Abs_Slope, FM_rate, AM_rate, Fpeak_Hz, spectral_entropy, Sound_duration_s, Q25, Q50, Q75, spectral_centroid, Harmonicity) %>%
+  mutate(arousal_z = scale(arousal)) %>%
+  droplevels()
+
+descr1.1 <- table(data_features$valence, data_features$call_type)
+
+# Create dataset with only alarms
+data_features_alarm <- rawdata %>%
+  filter(call_type == "Alarm") %>%
+  mutate(
+    fan_status = factor(if_else(trial %in% c("T6", "T7"), 1, 0)),
+  ) %>%
+  rename(arousal = arousal_15pre_15post_distance_px,
+         FM_rate = `FM_Rate_s-1`,
+         AM_rate = `AM_rate_s-1`,
+         Q25 = `Q25%_Hz`,
+         Q50 = `Q50%_Hz`,
+         Q75 = `Q75%_Hz`) %>%
+  select(individual_id, trial, fan_status, valence, arousal, Mean_F0_Hz, Max_F0_Hz, Range_F0_Hz, F0_Abs_Slope, FM_rate, AM_rate, Fpeak_Hz, spectral_entropy, Sound_duration_s, Q25, Q50, Q75, spectral_centroid, Harmonicity) %>%
+  mutate(arousal_z = scale(arousal))
+
+descr2 <- nrow(data_features_alarm)
+
+n_pos <- data_features %>%
+  filter(valence == "Positive") %>%
+  summarise(n = n_distinct(individual_id)) %>%
+  pull(n)
+
+# Write data set to CSV
+write.csv(data_features, "data_features_filteredArousal.csv", row.names = FALSE)
+```
+
+# Feature selection 
+Predefined acoustic features were selected for analyses based on prior research indicating that these features were potentially important for encoding valence. A total of 14 features were included: duration, peak frequency, mean spectral entropy, mean F0, max F0, range F0, Q25, Q50, Q75, absolute F0 slope, AM rate, FM rate, spectral centroid, and harmonicity. Min F0 was excluded because the minimum F0 of some calls were cut off due pre-processing step of high-pass filter at 300 Hz (used to remove ambient background noise) and was thus unreliable. 
+
+The following acoustic features were analysed: <p>
+1. Duration
+2. Peak frequency
+3. Mean spectral entropy
+4. Mean F0
+5. Max F0
+6. Range F0
+7. Q25
+8. Q50
+9. Q75
+10. Absolute F0 slope
+11. AM rate
+12. FM rate
+13. Spectral centroid
+14. Harmonicity
+
+This information is derived from the following papers: <p>
+- Collias & Joos 1953
+- McGrath et al. 2017
+- Osiecka et al. 2024 (seabird)
+- Osiecka et al. 2023 (seabird little auk)
+- Herborn et al. 2020
+- Pereira et al. 2022
+- Briefer 2020 
+
+# Statistical analyses
+Analyses were conducted using the R Statistical language (version 4.5.0; R Core Team, 2025).  Data visualisations indicated that positive calls were limited to lower arousal levels. We therefore restricted the cluck/whine dataset to the arousal range observed in positive calls (maximum positive-call arousal = `r round(max_positive_arousal, 3)`). Before this restriction, the dataset contained `r n_before_arousal_filter` positive and negative clucks/whines; `r n_removed_arousal_filter` calls above this range were excluded. This yielded `r sum(descr1.1["Positive", ])` positive and `r sum(descr1.1["Negative", ])` negative calls, consisting of `r sum(descr1.1[ ,"Whine"])` whines and `r sum(descr1.1[ , "Cluck"])` clucks produced by a total of `r length(unique(data_features$individual_id))` individuals (number of individuals producing positive calls = `r n_pos`).
+
+For call types that were produced in both positive and negative contexts (clucks and whines), separate models were fitted for each acoustic feature. For each feature, linear mixed models (LMMs) estimated using REML were fitted with the glmmTMB package (version 1.1.11; Brooks et al., 2017), containing the fixed predictors call_type, valence, arousal (z-scaled), and/or fan_status and random effect of individual_id (see list below). Models containing intercept only or intercept + fan_status were first compared to assess whether fan_status should be included at all: if fan_status improved model fit over the intercept-only model then it was retained. As the data were highly imbalanced across predictor combinations, interaction terms were not fitted; fixed effects from the additive model were therefore interpreted cautiously as average effects across the observed data structure. Model diagnostics were performed using the DHARMa package (version 0.4.7; Hartig, 2024). Gamma distributions with log link function and data transformations were used when assumptions of normality were violated; reported responses were back-transformed from the log scale. Non-homogeneity of variance was accounted by including dispersion terms (dispformula). The best fitting model was selected based on AIC.
+
+Alarm calls (n = `r descr2`) were modelled separately because they were produced only in negative contexts. These models aimed to determine whether arousal levels in alarm calls could be predicted by the pre-defined acoustic features. For each feature, separate LMMs were fitted that contained the fixed predictors arousal (z-scaled) and/or fan_status. Individual_id was included as a random effect. Model diagnostics were performed to evaluate model structure and fit, and the best fitting model was selected using AIC.
+
+List of models compared: <p>
+- 00 VAR ~ 1 + (1 | individual_id)
+- 0 VAR ~ fan_status + (1 | individual_id)
+- 1 VAR ~ valence + (1 | individual_id) + fan_status
+- 2 VAR ~ arousal + (1 | individual_id) + fan_status
+- 4 VAR ~ call_type + (1 | individual_id) + fan_status
+- 5 VAR ~ valence + arousal + (1 | individual_id) + fan_status
+- 6 VAR ~ valence + call_type + (1 | individual_id) + fan_status
+- 7 VAR ~ arousal + call_type + (1 | individual_id) + fan_status
+- 8 VAR ~ valence + call_type + arousal + (1 | individual_id) + fan_status
+
+# Results
+
+## Valence and arousal in whines and clucks
+For whines and clucks, three features varied with valence independently of arousal: *duration, Q25 frequency, and FM rate*. Positive vocalisations were significantly shorter and had lower Q25 frequency and FM rate than negative vocalisations. By contrast, *max F0* increased significantly with arousal but did not predict valence, suggesting that this feature primarily reflected arousal rather than valence in whines and clucks. Four additional features were associated with both valence and arousal: *absolute F0 slope, spectral centroid, spectral entropy, and AM rate*. *Absolute F0 slope, spectral entropy*, and *AM rate* were higher in positive vocalisations and positively correlated with arousal. On the other hand, *spectral centroid* was greater in positive vocalisations but negatively correlated with arousal.
+
+[Go to Figures](#figures)
+
+### Duration
+```{r duration}
+
+#### Duration ####
+dur6 <- glmmTMB(Sound_duration_s ~ call_type + valence + (1 | individual_id),
+                data = data_features,
+                family = Gamma(link = "log")
+                )
+
+dur_table <- tidy(dur6)
+dur_r2 <- r2(dur6)
+
+table_dur <- as.data.frame(emmeans(dur6, ~valence, type = "response"))
+
+v_dur <- ggplot(table_dur, aes(x = valence, y = response)) +
+  geom_jitter(data = data_features, aes(x = valence, y = Sound_duration_s), alpha = 0.2, width = 0.01) +
+  geom_point(size = 3, colour = "red") +
+  geom_errorbar(aes(ymax = asymp.UCL, ymin = asymp.LCL), width = 0.1) +
+  scale_y_log10() +
+  labs(title = "Call duration", x = "Valence", y = "Duration (s, log scale)", caption = "Error bars = 95% CI") +
+  theme_bw()
+
+```
+For whines and clucks, the best fitting model for <i> duration </i> contained call type and valence as fixed predictors. The model's total explanatory power was substantial (conditional R2 = `r round(dur_r2$R2_conditional, 2)`) with fixed effects alone explaining a fair proportion of the variation (marginal R2 = `r round(dur_r2$R2_marginal, 2)`). Whines were significantly longer than clucks (beta = `r round(dur_table$estimate[dur_table$term == "call_typeWhine"], 2)`, SE = `r round(dur_table$std.error[dur_table$term == "call_typeWhine"], 2)`, z =  `r round(dur_table$statistic[dur_table$term == "call_typeWhine"], 2)`, p =  `r round(dur_table$p.value[dur_table$term == "call_typeWhine"], 5)`) and negative calls were significantly longer than positive calls (beta =  `r round(dur_table$estimate[dur_table$term == "valenceNegative"], 2)`, z =  `r round(dur_table$statistic[dur_table$term == "valenceNegative"], 2)`, p = `r round(dur_table$p.value[dur_table$term == "valenceNegative"], 3)`).
+
+### Peak frequency
+```{r peak freq}
+
+fpeak4 <- glmmTMB(Fpeak_Hz ~ call_type + (1 | individual_id),
+                  data = data_features,
+                  family = gaussian(),
+                  REML = TRUE) 
+
+fpeak_table <- tidy(fpeak4)
+fpeak_r2 <- r2(fpeak4)
+
+```
+
+The best fitting model for <i> peak frequency </i> included only call type, which accounted for only a small proportion of variation in peak frequency (conditional R2 = `r round(fpeak_r2$R2_conditional, 2)`, marginal R2 = `r round(fpeak_r2$R2_marginal, 2)`). Whines had significantly higher peak frequency than clucks  (beta = `r round(fpeak_table$estimate[fpeak_table$term == "call_typeWhine"], 2)`, SE = `r round(fpeak_table$std.error[fpeak_table$term == "call_typeWhine"], 2)`, z =  `r round(fpeak_table$statistic[fpeak_table$term == "call_typeWhine"], 2)`, p =  `r round(fpeak_table$p.value[fpeak_table$term == "call_typeWhine"], 3)`). No other predictors were retained in the final model of peak frequency.
+
+### Spectral entropy
+```{r spectral entropy}
+
+entr7 <- glmmTMB(spectral_entropy ~ call_type + valence + arousal_z + fan_status + (1 | individual_id),
+                 data = data_features,
+                 family = gaussian(),
+                 REML = TRUE
+                 )
+
+table_entr_valence <- as.data.frame(emmeans(entr7, ~valence, type = "response"))
+
+entr_table <- tidy(entr7)
+entr_r2 <- r2(entr7)
+
+v_entr <- ggplot(table_entr_valence, aes(x = valence, y = emmean)) +
+  geom_jitter(data = data_features, aes(x = valence, y = spectral_entropy), alpha = 0.2, width = 0.01) +
+  geom_errorbar(aes(ymax = upper.CL, ymin = lower.CL), width = 0.1) +
+  geom_point(size = 3, colour = "red") +
+  labs(title = "Spectral entropy - valence", x = "Valence", y = "Spectral entropy", caption = "Estimated marginal means overlaid on raw data; error bars = 95% CI") +
+  theme_bw()
+
+a_entr <- ggplot(data_features, aes(x = arousal, y = spectral_entropy)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(title = "Spectral entropy - arousal", x = "Arousal (pixel change)", y = "Spectral entropy", caption = "Shaded band = 95% CI from unadjusted linear fit") +
+  theme_bw()
+```
+
+The best fitting model for <i> spectral entropy </i> included call type, valence, arousal, and fan status that explained a substantial amount of variation (conditional R2 = `r round(entr_r2$R2_conditional, 2)`), with fixed effects contributing a fair proportion (marginal R2 = `r round(entr_r2$R2_marginal, 2)`). Whines had a significantly lower spectral entropy than clucks (beta = `r round(entr_table$estimate[entr_table$term == "call_typeWhine"], 2)`, SE = `r round(entr_table$std.error[entr_table$term == "call_typeWhine"], 2)`,  z =  `r round(entr_table$statistic[entr_table$term == "call_typeWhine"], 2)`, p =  `r round(entr_table$p.value[entr_table$term == "call_typeWhine"], 3)`). Arousal was positively and significantly associated with spectral entropy (beta = `r round(entr_table$estimate[entr_table$term == "arousal_z"], 2)`, SE = `r round(entr_table$std.error[entr_table$term == "arousal_z"], 2)`, z =  `r round(entr_table$statistic[entr_table$term == "arousal_z"], 2)`, p =  `r round(entr_table$p.value[entr_table$term == "arousal_z"], 3)`). Positive vocalisations had significantly higher spectral entropy than negative vocalisations (beta = `r round(entr_table$estimate[entr_table$term == "valenceNegative"], 2)`, SE = `r round(entr_table$std.error[entr_table$term == "valenceNegative"], 2)`, z =  `r round(entr_table$statistic[entr_table$term == "valenceNegative"], 2)`, p =  `r round(entr_table$p.value[entr_table$term == "valenceNegative"], 3)`). Fan noise also significantly increased spectral entropy (beta = `r round(entr_table$estimate[entr_table$term == "fan_status1"], 2)`, SE = `r round(entr_table$std.error[entr_table$term == "fan_status1"], 2)`, z =  `r round(entr_table$statistic[entr_table$term == "fan_status1"], 2)`, p =  `r round(entr_table$p.value[entr_table$term == "fan_status1"], 3)`).
+
+### Mean F0
+
+```{r mean FO}
+
+meanF0_m7 <- glmmTMB(Mean_F0_Hz ~ arousal_z + call_type + fan_status + (1 | individual_id), 
+                     data = data_features, 
+                     family = Gamma(link = "log")
+                     )
+
+meanF0_table <- tidy(meanF0_m7)
+meanF0_r2 <- r2(meanF0_m7)
+
+```
+
+The best fitting model for <i> mean F0 </i> included arousal, call type, and fan status as fixed predictors. The model explained a substantial amount of variation (conditional R2 = `r round(meanF0_r2$R2_conditional, 2)`), with fixed effects contributing a fair proportion (marginal R2 = `r round(meanF0_r2$R2_marginal, 2)`). Whines had significantly higher mean F0 than clucks (beta = `r round(meanF0_table$estimate[meanF0_table$term == "call_typeWhine"], 2)`, SE = `r round(meanF0_table$std.error[meanF0_table$term == "call_typeWhine"], 2)`,  z =  `r round(meanF0_table$statistic[meanF0_table$term == "call_typeWhine"], 2)`, p =  `r round(meanF0_table$p.value[meanF0_table$term == "call_typeWhine"], 3)`). Arousal was positively but non-significantly associated with mean F0 (beta = `r round(meanF0_table$estimate[meanF0_table$term == "arousal_z"], 2)`, SE = `r round(meanF0_table$std.error[meanF0_table$term == "arousal_z"], 2)`, z =  `r round(meanF0_table$statistic[meanF0_table$term == "arousal_z"], 2)`, p =  `r round(meanF0_table$p.value[meanF0_table$term == "arousal_z"], 3)`) and ambient noise caused by the fan significantly decreased mean F0 (beta = `r round(meanF0_table$estimate[meanF0_table$term == "fan_status1"], 2)`, SE = `r round(meanF0_table$std.error[meanF0_table$term == "fan_status1"], 2)`, z =  `r round(meanF0_table$statistic[meanF0_table$term == "fan_status1"], 2)`, p =  `r round(meanF0_table$p.value[meanF0_table$term == "fan_status1"], 3)`).
+
+### Max F0
+
+```{r max F0}
+
+maxF0_m7 <- glmmTMB(Max_F0_Hz ~ arousal_z + call_type + (1 | individual_id), 
+                     data = data_features, 
+                     family = gaussian(),
+                    REML = TRUE
+                    )
+
+maxF0_table <- tidy(maxF0_m7)
+maxF0_r2 <- r2(maxF0_m7)
+
+a_maxF0 <- ggplot(data_features, aes(x = arousal, y = Max_F0_Hz)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Max F0",y = "Max F0 (Hz)", x = "Arousal (pixel change)") +
+  theme_bw() 
+
+```
+
+The best fitting model for <i> max F0 </i> included arousal and call type as predictors, although the model accounted for only a small proportion of variation in max F0 (conditional and marginal R2 = `r round(maxF0_r2$R2_conditional, 2)`). Whines had significantly higher maximum F0 than clucks (beta = `r round(maxF0_table$estimate[maxF0_table$term == "call_typeWhine"], 2)`, SE = `r round(maxF0_table$std.error[maxF0_table$term == "call_typeWhine"], 2)`, z =  `r round(maxF0_table$statistic[maxF0_table$term == "call_typeWhine"], 2)`, p =  `r round(maxF0_table$p.value[maxF0_table$term == "call_typeWhine"], 3)`). Arousal had a significant but very small positive association with max F0 (beta = `r round(maxF0_table$estimate[maxF0_table$term == "arousal_z"], 2)`, SE = `r round(maxF0_table$std.error[maxF0_table$term == "arousal_z"], 2)`, z =  `r round(maxF0_table$statistic[maxF0_table$term == "arousal_z"], 2)`, p =  `r round(maxF0_table$p.value[maxF0_table$term == "arousal_z"], 3)`).
+
+### Range F0
+```{r range F0}
+
+rangeF0_m4 <- glmmTMB(Range_F0_Hz ~ call_type + (1 | individual_id), 
+                     data = data_features, 
+                     family = gaussian(),
+                    REML = TRUE
+                    )
+
+rangeF0_table <- tidy(rangeF0_m4)
+rangeF0_r2 <- r2(rangeF0_m4)
+
+```
+
+The best fitting model for range F0 contained only call type as a predictor, with the model accounting for only a small proportion of variation in the data (conditional and marginal R2 = `r round(rangeF0_r2$R2_conditional, 2)`). Whines had significantly greater F0 range than clucks (beta = `r round(rangeF0_table$estimate[rangeF0_table$term == "call_typeWhine"], 2)`, SE = `r round(rangeF0_table$std.error[rangeF0_table$term == "call_typeWhine"], 2)`, z =  `r round(rangeF0_table$statistic[rangeF0_table$term == "call_typeWhine"], 2)`, p =  `r round(rangeF0_table$p.value[rangeF0_table$term == "call_typeWhine"], 3)`). 
+
+### Q25 frequency
+```{r Q25}
+
+q25_m6g <- glmmTMB(Q25 ~ call_type + valence + (1 | individual_id), 
+                     data = data_features, 
+                     family = Gamma(link = "log"),
+                    )
+
+table_q25_valence <- as.data.frame(emmeans(q25_m6g, ~valence, type = "response"))
+
+q25_table <- tidy(q25_m6g)
+q25_r2 <- r2(q25_m6g)
+
+v_q25 <- ggplot(table_q25_valence, aes(x = valence, y = response)) +
+  geom_jitter(data = data_features, aes(x = valence, y = Q25), alpha = 0.2, width = 0.01) +
+  geom_errorbar(aes(ymax = asymp.UCL, ymin = asymp.LCL), width = 0.1) +
+  geom_point(size = 3, colour = "red") +
+  scale_y_log10() +
+  labs(title = "Q25%", x = "Valence", y = "Q25 (log scale)", caption = "Error bars = 95% CI") +
+  theme_bw()
+
+
+```
+
+The best fitting model for Q25 contained the predictors call type and valence. The model accounted for a moderate amount of variation (conditional R2 = `r round(q25_r2$R2_conditional,2)`) with fixed predictors accounting for only a small proportion (marginal R2 = `r round(q25_r2$R2_marginal,2)`). Whines had a significantly higher Q25 frequency than clucks (beta = `r round(q25_table$estimate[q25_table$term == "call_typeWhine"], 2)`, SE = `r round(q25_table$std.error[q25_table$term == "call_typeWhine"], 2)`, z =  `r round(q25_table$statistic[q25_table$term == "call_typeWhine"], 2)`, p =  `r round(q25_table$p.value[q25_table$term == "call_typeWhine"], 3)`) and negative vocalisations had a significantly higher Q25 than positive vocalisations (beta = `r round(q25_table$estimate[q25_table$term == "valenceNegative"], 2)`, SE = `r round(q25_table$std.error[q25_table$term == "valenceNegative"], 2)`, z =  `r round(q25_table$statistic[q25_table$term == "valenceNegative"], 2)`, p =  `r round(q25_table$p.value[q25_table$term == "valenceNegative"], 3)`).
+
+### Q50 frequency
+```{r Q50}
+
+q50_m4_REML <- glmmTMB(Q50 ~ call_type + (1 | individual_id), 
+                     data = data_features, 
+                     family = gaussian(),
+                    REML = TRUE
+                    )
+
+q50_table <- tidy(q50_m4_REML)
+q50_r2 <- r2(q50_m4_REML)
+
+```
+
+The best fitting model for Q50 contained only call type as a fixed predictor. The model explained a moderate proportion of variance overall (conditional R² = `r round(q50_r2$R2_conditional,2)`), although only a small proportion was explained by fixed effects (marginal R2 = `r round(q50_r2$R2_marginal,2)`). Whines had a significantly higher Q50 frequency than clucks (beta = `r round(q50_table$estimate[q50_table$term == "call_typeWhine"], 2)`, SE = `r round(q50_table$std.error[q50_table$term == "call_typeWhine"], 2)`, z =  `r round(q50_table$statistic[q50_table$term == "call_typeWhine"], 2)`, p =  `r round(q50_table$p.value[q50_table$term == "call_typeWhine"], 3)`).
+
+### Q75 frequency
+```{r Q75}
+
+q75_m4_REML <- glmmTMB(Q75 ~ call_type + fan_status + (1 | individual_id), 
+                     data = data_features, 
+                     family = gaussian(),
+                    REML = TRUE
+                    )
+
+q75_table <- tidy(q75_m4_REML)
+q75_r2 <- r2(q75_m4_REML)
+
+```
+
+The best fitting model for Q75 contained call type and fan status as fixed predictors. The model explained `r round(q75_r2$R2_conditional, 2)` of the variation overall (conditional R2), with fixed effects explaining `r round(q75_r2$R2_marginal, 2)` (marginal R2). Whines had a significantly higher Q75 frequency than clucks (beta = `r round(q75_table$estimate[q75_table$term == "call_typeWhine"], 2)`, SE = `r round(q75_table$std.error[q75_table$term == "call_typeWhine"], 2)`, z = `r round(q75_table$statistic[q75_table$term == "call_typeWhine"], 2)`, p = `r round(q75_table$p.value[q75_table$term == "call_typeWhine"], 3)`). Fan status was also retained in the final model (beta = `r round(q75_table$estimate[q75_table$term == "fan_status1"], 2)`, SE = `r round(q75_table$std.error[q75_table$term == "fan_status1"], 2)`, z = `r round(q75_table$statistic[q75_table$term == "fan_status1"], 2)`, p = `r round(q75_table$p.value[q75_table$term == "fan_status1"], 3)`).
+
+### Absolute F0 slope
+```{r absolute F0 slope, message=FALSE, warning=FALSE}
+f0slope_m5_REML <- glmmTMB(F0_Abs_Slope ~ arousal_z + valence + (1 | individual_id), 
+                     data = data_features, 
+                     family = gaussian(),
+                     REML = TRUE
+                     )
+
+f0slope_table <- tidy(f0slope_m5_REML)
+f0slope_r2 <- r2(f0slope_m5_REML)
+
+table_f0slope_valence <- as.data.frame(emmeans(f0slope_m5_REML, ~valence, type = "response"))
+
+v_f0slope <- ggplot(table_f0slope_valence, aes(x = valence, y = emmean)) +
+  geom_jitter(data = data_features, aes(x = valence, y = F0_Abs_Slope), alpha = 0.2, width = 0.01) +
+  geom_errorbar(aes(ymax = upper.CL, ymin = lower.CL), width = 0.1) +
+  geom_point(size = 3, colour = "red") +
+  labs(x = "Valence", y = "Absolute F0 slope", caption = "Error bars = 95% CI") +
+  theme_bw()
+
+a_f0slope <- ggplot(data_features, aes(x = arousal, y = F0_Abs_Slope)) +
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Arousal (pixel change)", y = "Absolute F0 slope") +
+  theme_bw()
+```
+The best fitting model for absolute F0 slope contained arousal and valence as fixed predictors. The fixed effects explained a small proportion of the modelled variance (marginal R2 = `r round(f0slope_r2$R2_marginal,2)`). The random-intercept variance for individual identity was estimated near zero, suggesting that conditional R2 was therefore not meaningfully different from the marginal R2. Arousal was significantly and positively associated with absolute F0 slope (beta = `r round(f0slope_table$estimate[f0slope_table$term == "arousal_z"], 2)`, SE = `r round(f0slope_table$std.error[f0slope_table$term == "arousal_z"], 2)`, z =  `r round(f0slope_table$statistic[f0slope_table$term == "arousal_z"], 2)`, p =  `r round(f0slope_table$p.value[f0slope_table$term == "arousal_z"], 3)`) and negative vocalisations had lower absolute F0 slope than positive calls (beta = `r round(f0slope_table$estimate[f0slope_table$term == "valenceNegative"], 2)`, SE = `r round(f0slope_table$std.error[f0slope_table$term == "valenceNegative"], 2)`, z =  `r round(f0slope_table$statistic[f0slope_table$term == "valenceNegative"], 2)`, p =  `r round(f0slope_table$p.value[f0slope_table$term == "valenceNegative"], 3)`).
+
+### AM rate
+```{r AM rate}
+AMrate_m8_REML <- glmmTMB(AM_rate ~ call_type + arousal_z + valence + (1 | individual_id), 
+                     data = data_features, 
+                     family = gaussian(),
+                    REML = TRUE
+                    )
+
+AM_table <- tidy(AMrate_m8_REML)
+AM_r2 <- r2(AMrate_m8_REML)
+
+table_AMrate_valence <- as.data.frame(emmeans(AMrate_m8_REML, ~valence, type = "response"))
+v_AMrate <- ggplot(table_AMrate_valence, aes(x = valence, y = emmean)) +
+  geom_jitter(data = data_features, aes(x = valence, y = AM_rate), alpha = 0.2, width = 0.01) +
+  geom_errorbar(aes(ymax = upper.CL, ymin = lower.CL), width = 0.1) +
+  geom_point(size = 3, colour = "red") +
+  labs(x = "Valence", y = "AM rate", caption = "Error bars = 95% CI") +
+  theme_bw()
+
+a_AMrate <- ggplot(data_features, aes(x = arousal, y = AM_rate)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Arousal (pixel change)", y = "AM rate") +
+  theme_bw()
+
+AM_table_type <- data_features %>% 
+  group_by(call_type) %>% 
+  summarise(average = mean(AM_rate, na.rm = TRUE),
+            sd = sd(AM_rate, na.rm = TRUE))
+```
+
+The best fitting model for AM rate included the fixed predictors call type, arousal, and valence. The model explained a moderate proportion of the modelled variance (conditional R2 = `r round(AM_r2$R2_conditional,2)`), of which the fixed effects explained only a small proportion (marginal R2 = `r round(AM_r2$R2_marginal,2)`). Call type did not significantly predict AM rate (beta = `r round(AM_table$estimate[AM_table$term == "call_typeWhine"], 2)`, SE = `r round(AM_table$std.error[AM_table$term == "call_typeWhine"], 2)`, z =  `r round(AM_table$statistic[AM_table$term == "call_typeWhine"], 2)`, p =  `r round(AM_table$p.value[AM_table$term == "call_typeWhine"], 3)`. Mean +- SD of AM rate of clucks = `r round(AM_table_type %>% filter(call_type == "Cluck") %>% pull(average), 2)` 
++- `r round(AM_table_type %>% filter(call_type == "Cluck") %>% pull(sd), 2)` and whines = `r round(AM_table_type %>% filter(call_type == "Whine") %>% pull(average), 2)` 
++- `r round(AM_table_type %>% filter(call_type == "Whine") %>% pull(sd), 2)`
+
+
+However, AM rate was significantly and positively associated with arousal (beta = `r round(AM_table$estimate[AM_table$term == "arousal_z"], 2)`, SE = `r round(AM_table$std.error[AM_table$term == "arousal_z"], 2)`, z =  `r round(AM_table$statistic[AM_table$term == "arousal_z"], 2)`, p =  `r round(AM_table$p.value[AM_table$term == "arousal_z"], 3)`) and lower in negative than positive vocalisations (beta = `r round(AM_table$estimate[AM_table$term == "valenceNegative"], 2)`, SE = `r round(AM_table$std.error[AM_table$term == "valenceNegative"], 2)`, z =  `r round(AM_table$statistic[AM_table$term == "valenceNegative"], 2)`, p =  `r round(AM_table$p.value[AM_table$term == "valenceNegative"], 3)`). 
+
+### FM rate
+```{r FM rate}
+
+data_features <- data_features %>%
+  mutate(FM_rate_cube = FM_rate^3)
+
+FMrate_m8_REML <- glmmTMB(FM_rate_cube ~ call_type + arousal_z + valence + fan_status + (1 | individual_id), 
+                     data = data_features, 
+                     family = gaussian(),
+                     dispformula = ~fan_status,
+                    REML = TRUE
+                    )
+
+FM_table <-tidy(FMrate_m8_REML)
+#FM_r2 <- r2(FMrate_m8_REML)
+
+cube_root <- function(x) sign(x) * abs(x)^(1/3) # function to transform back
+
+table_FMrate_valence <- as.data.frame(emmeans(FMrate_m8_REML, ~valence, type = "response"))
+ 
+table_FMrate_valence$response_back <- cube_root(table_FMrate_valence$emmean) # adding back-transformed values
+table_FMrate_valence$lower_back <- cube_root(table_FMrate_valence$lower.CL)
+table_FMrate_valence$upper_back <- cube_root(table_FMrate_valence$upper.CL)
+
+v_FMrate <- ggplot(table_FMrate_valence, aes(x = valence, y = response_back)) +
+  geom_jitter(data = data_features, aes(x = valence, y = FM_rate), alpha = 0.2, width = 0.01) +
+  geom_errorbar(aes(ymax = upper_back, ymin = lower_back), width = 0.1) +
+  geom_point(size = 3, colour = "red") +
+  labs(title = "FM rate - valence", x = "Valence", y = "FM rate", caption = "Raw observations overlaid with estimated marginal means and 95% CIs back-transformed from cubed-response model") +
+  theme_bw()
+
+FM_table_type <- data_features %>% 
+  group_by(call_type) %>% 
+  summarise(average = mean(FM_rate, na.rm = TRUE),
+            sd = sd(FM_rate, na.rm = TRUE))
+```
+
+The best fitting model for FM rate included the fixed predictors call type, arousal, valence, and fan status. As the final model used a fan-status-specific dispersion structure, standard marginal/conditional R2 estimates were unavailable. Arousal was negatively but not significantly associated with FM rate (beta = `r round(FM_table$estimate[FM_table$term == "arousal_z"], 2)`, SE = `r round(FM_table$std.error[FM_table$term == "arousal_z"], 2)`, z =  `r round(FM_table$statistic[FM_table$term == "arousal_z"], 2)`, p =  `r round(FM_table$p.value[FM_table$term == "arousal_z"], 3)`). FM rate was significantly greater in whines than clucks  (beta = `r round(FM_table$estimate[FM_table$term == "call_typeWhine"], 4)`, SE = `r round(FM_table$std.error[FM_table$term == "call_typeWhine"], 2)`, z =  `r round(FM_table$statistic[FM_table$term == "call_typeWhine"], 2)`, p =  `r round(FM_table$p.value[FM_table$term == "call_typeWhine"], 3)`) and in negative than positive vocalisations (beta = `r round(FM_table$estimate[FM_table$term == "valenceNegative"], 2)`, SE = `r round(FM_table$std.error[FM_table$term == "valenceNegative"], 2)`, z =  `r round(FM_table$statistic[FM_table$term == "valenceNegative"], 2)`, p =  `r round(FM_table$p.value[FM_table$term == "valenceNegative"], 3)`). FM rate was also lower when the fan was on (beta = `r round(FM_table$estimate[FM_table$term == "fan_status1"], 2)`, SE = `r round(FM_table$std.error[FM_table$term == "fan_status1"], 2)`, z =  `r round(FM_table$statistic[FM_table$term == "fan_status1"], 2)`, p =  `r round(FM_table$p.value[FM_table$term == "fan_status1"], 3)`). Mean +- SD of FM rate of clucks = `r round(FM_table_type %>% filter(call_type == "Cluck") %>% pull(average), 2)` +- `r round(FM_table_type %>% filter(call_type == "Cluck") %>% pull(sd), 2)` and whines = `r round(FM_table_type %>% filter(call_type == "Whine") %>% pull(average), 2)` +- `r round(FM_table_type %>% filter(call_type == "Whine") %>% pull(sd), 2)`.
+
+### Spectral centroid
+```{r spectral centroid}
+
+centroid_m8_disp_REML <- glmmTMB(spectral_centroid ~ valence + call_type + arousal_z + fan_status + (1 | individual_id),
+                         data = data_features,
+                         dispformula = ~valence + fan_status,
+                         family = gaussian(),
+                         REML = TRUE
+                         )
+
+centroid_table <- tidy(centroid_m8_disp_REML)
+table_centroid_valence <- as.data.frame(emmeans(centroid_m8_disp_REML, ~valence, type = "response"))
+
+v_centroid <- ggplot(table_centroid_valence, aes(x = valence, y = emmean)) +
+  geom_jitter(data = data_features, aes(x = valence, y = spectral_centroid), alpha = 0.2, width = 0.01) +
+  geom_errorbar(aes(ymax = upper.CL, ymin = lower.CL), width = 0.1) +
+  geom_point(size = 3, colour = "red") +
+  labs(title = "", x = "Valence", y = "Spectral centroid", caption = "Error bars = 95% CI") +
+  theme_bw()
+
+a_centroid <- ggplot(data_features, aes(x = arousal, y = spectral_centroid)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "", x = "Arousal (pixel change)", y = "Spectral centroid") +
+  theme_bw() # This shows the raw relationship without account for other model parameters, which shows a negative instead of positive relationship
+
+centroid_table_type <- data_features %>% 
+  group_by(call_type) %>% 
+  summarise(average = mean(spectral_centroid, na.rm = TRUE),
+            sd = sd(spectral_centroid, na.rm = TRUE))
+
+```
+
+The best fitting model for spectral centroid included the fixed predictors call type, arousal, valence, and fan status. As the final model used a fan-status-specific dispersion structure, standard marginal/conditional R2 estimates were unavailable. Arousal was significantly and positively associated with spectral centroid (beta = `r round(centroid_table$estimate[centroid_table$term == "arousal_z"], 2)`, SE = `r round(centroid_table$std.error[centroid_table$term == "arousal_z"], 2)`, z =  `r round(centroid_table$statistic[centroid_table$term == "arousal_z"], 2)`, p =  `r round(centroid_table$p.value[centroid_table$term == "arousal_z"], 3)`).Spectral centroid was significantly lower in whines than clucks  (beta = `r round(centroid_table$estimate[centroid_table$term == "call_typeWhine"], 4)`, SE = `r round(centroid_table$std.error[centroid_table$term == "call_typeWhine"], 2)`, z =  `r round(centroid_table$statistic[centroid_table$term == "call_typeWhine"], 2)`, p =  `r round(centroid_table$p.value[centroid_table$term == "call_typeWhine"], 3)`) and in negative than positive vocalisations (beta = `r round(centroid_table$estimate[centroid_table$term == "valenceNegative"], 2)`, SE = `r round(centroid_table$std.error[centroid_table$term == "valenceNegative"], 2)`, z =  `r round(centroid_table$statistic[centroid_table$term == "valenceNegative"], 2)`, p =  `r round(centroid_table$p.value[centroid_table$term == "valenceNegative"], 3)`). Spectral centroid was also lower when the fan was on (beta = `r round(centroid_table$estimate[centroid_table$term == "fan_status1"], 2)`, SE = `r round(centroid_table$std.error[centroid_table$term == "fan_status1"], 2)`, z =  `r round(centroid_table$statistic[centroid_table$term == "fan_status1"], 2)`, p =  `r round(centroid_table$p.value[centroid_table$term == "fan_status1"], 3)`). Mean +- SD of spectral centroid of clucks = `r round(centroid_table_type %>% filter(call_type == "Cluck") %>% pull(average), 2)` +- `r round(centroid_table_type %>% filter(call_type == "Cluck") %>% pull(sd), 2)` and whines = `r round(centroid_table_type %>% filter(call_type == "Whine") %>% pull(average), 2)` +- `r round(centroid_table_type %>% filter(call_type == "Whine") %>% pull(sd), 2)`.
+
+### Figures
+
+```{r combined figures}
+
+# 1. Valence-only features
+p_valence_only <- 
+  (v_dur | v_q25 | v_FMrate) +
+ plot_annotation(
+    title = "Features predicted by valence only", 
+    theme = theme(
+      plot.title = element_text(size = 20, face = "bold")
+    )
+ )
+
+# 2. Arousal-only features
+p_arousal_only <- 
+  a_maxF0 +
+  plot_annotation(
+    title = "Features predicted by arousal only", 
+    theme = theme(
+      plot.title = element_text(size = 20, face = "bold")
+    )
+  )
+# 3. Features associated with both valence and arousal
+p_both2 <- 
+  (
+    (v_centroid | a_centroid | v_AMrate | a_AMrate) /
+    (v_f0slope | a_f0slope | v_entr | a_entr)
+  ) +
+ plot_annotation(
+    title = "Features predicted by valence and arousal", 
+    theme = theme(
+      plot.title = element_text(size = 20, face = "bold")
+    )
+ )
+
+p_valence_only
+p_arousal_only
+p_both2
+```
+
+
+## Arousal in distress calls
+
+Arousal significantly predicted only harmonicity, even though it was included in models of max F0 and AM rate. Higher arousal was associated with higher harmonicity in distress calls. Fan status was included in models of spectral entropy, mean F0, max F0, spectral centroid, and harmonicity, but only significantly explained variation in spectral entropy, mean F0, and harmonicity of distress calls.
+
+```{r alarm arousal plots}
+
+harmonicity_m3 <- glmmTMB(Harmonicity ~ arousal_z + fan_status + (1 | individual_id),
+                               data = data_features_alarm,
+                               family = gaussian()
+                               )
+
+harmonicity_table <- tidy(harmonicity_m3)
+harmonicity_r2 <- r2(harmonicity_m3)
+
+a_alarm <- ggplot(data_features_alarm, aes(x = arousal, y = Harmonicity)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Distress calls", x = "Arousal (pixel change)", y = "Harmonicity") +
+  theme_bw()
+
+a_alarm
+```
+
+The best fitting model for harmonicity included the fixed predictors arousal and fan status. The model explained a moderate proportion of the modelled variance (conditional R2 = `r round(harmonicity_r2$R2_conditional,2)`), of which the fixed effects explained large proportion (marginal R2 = `r round(harmonicity_r2$R2_marginal,2)`). Arousal was significantly and positively associated with harmonicity (beta = `r round(harmonicity_table$estimate[harmonicity_table$term == "arousal_z"], 2)`, SE = `r round(harmonicity_table$std.error[harmonicity_table$term == "arousal_z"], 2)`, z =  `r round(harmonicity_table$statistic[harmonicity_table$term == "arousal_z"], 2)`, p =  `r round(harmonicity_table$p.value[harmonicity_table$term == "arousal_z"], 3)`). Similarly, fan status was positively and significantly associated with harmonicity (beta = `r round(harmonicity_table$estimate[harmonicity_table$term == "fan_status1"], 2)`, SE = `r round(harmonicity_table$std.error[harmonicity_table$term == "fan_status1"], 2)`, z =  `r round(harmonicity_table$statistic[harmonicity_table$term == "fan_status1"], 2)`, p =  `r round(harmonicity_table$p.value[harmonicity_table$term == "fan_status1"], 3)`).
